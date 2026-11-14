@@ -1,0 +1,27 @@
+# DroidTrace run configuration
+duration: 120          # seconds to observe the app after launch
+boot_timeout: 1200     # TCG boots are slow
+# package: com.example.sample   # auto-detected with aapt2 if omitted
+
+emulator:
+  arch: aarch64
+  plugin_path: build/libinsntrace.so
+  machine: virt
+  cpu: cortex-a76
+  smp: 2
+  memory: 4G
+  kernel: images/arm64/kernel
+  initrd: images/arm64/initrd.img
+  disks: [images/arm64/system.qcow2, images/arm64/userdata.qcow2]
+  append: "console=ttyAMA0 androidboot.hardware=qemu"
+  adb_host_port: 15555
+  snapshot: true        # never persist guest changes
+  network: isolated     # no internet egress from the guest
+
+trace:
+  libraries: ["lib*.so"]          # globs on basename or full path
+  exclude: ["libart*.so", "libhwui.so"]
+  anchors: ["/data/app/*"]        # libs unique to the target process
+  registers: gpr                  # gpr | all | "x0:x1:x2:sp:pc"
+  strict_process: true
+  maps_poll_interval: 0.5

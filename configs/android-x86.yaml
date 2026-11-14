@@ -1,0 +1,44 @@
+# Android-x86 9.0 (x86_64) live ISO under QEMU (software emulation).
+# Boot files: extract `kernel` and `initrd.img` from the ISO into images/x86_64/.
+duration: 90
+boot_timeout: 2400
+
+emulator:
+  arch: x86_64
+  engine: plugin                 # the built-in tracer is arm64-only
+  plugin_path: /opt/droidtrace/libinsntrace.so
+  machine: pc
+  cpu: max
+  smp: 2
+  memory: 2G      # keep modest: the phone runs inside Docker's VM (often ~4 GB)
+  cdrom: images/x86_64/android-x86_64-9.0-r2.iso
+  kernel: images/x86_64/kernel
+  initrd: images/x86_64/initrd.img
+  append: "root=/dev/ram0 SRC= DATA= console=ttyS0 androidboot.selinux=permissive nomodeset HWACCEL=0 clocksource=tsc tsc=reliable"
+  display_device: VGA
+  console_socket: /tmp/droidtrace-console.sock
+  monitor_socket: /tmp/droidtrace-monitor.sock
+  state_disk: images/x86_64/state.qcow2   # created by `droidtrace prepare`
+  # Runs on the root serial console within seconds of boot. Skipping app precompilation
+  # (dexopt) and using the TSC clock make the first boot many times faster under emulation.
+  console_setup:
+    - "setprop pm.dexopt.first-boot extract"
+    - "setprop pm.dexopt.boot extract"
+    - "setprop pm.dexopt.install extract"
+    # Android-x86 shows the network card as Wi-Fi and leaves it without IPv4 until Wi-Fi
+    # is set up; give it QEMU's usual guest address so adb can reach it.
+    - "ip addr add 10.0.2.15/24 dev wifi_eth 2>/dev/null; ip link set wifi_eth up"
+    - "ip rule add from all lookup main pref 9000 2>/dev/null"
+    - "setprop service.adb.tcp.port 5555"
+    - "setprop persist.adb.tcp.port 5555"
+    # restart adbd only if it is not listening yet (these lines are re-sent every 30 s)
+    - "netstat -ltn | grep -q :5555 || (stop adbd; start adbd)"
+  disks: []
+  snapshot: true
+  network: isolated
+
+trace:
+  libraries: ["libdtdemo.so"]
+  anchors: ["/data/app/*"]
+  registers: gpr
+  strict_process: true

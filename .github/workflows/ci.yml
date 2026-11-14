@@ -1,0 +1,52 @@
+name: CI
+on:
+  push: {branches: [main]}
+  pull_request:
+permissions: {contents: read}
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy: {matrix: {python: ["3.10", "3.11", "3.12", "3.13"]}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "${{ matrix.python }}"}
+      - run: pip install -e ".[dev,disasm,parquet]"
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+      - run: mypy src
+      - run: pytest --cov=droidtrace --cov-report=xml
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libglib2.0-dev cmake pkg-config
+      - name: Fetch QEMU plugin header
+        run: |
+          mkdir -p qemu/include/qemu
+          curl -sSfL https://gitlab.com/qemu-project/qemu/-/raw/v10.0.3/include/qemu/qemu-plugin.h \
+            -o qemu/include/qemu/qemu-plugin.h
+      - run: make plugin QEMU_SRC=$PWD/qemu
+  qemu-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch applies cleanly to pinned QEMU
+        run: |
+          curl -sfL https://download.qemu.org/qemu-10.0.3.tar.xz | tar xJ
+          sh qemu-patch/apply.sh qemu-10.0.3
+  docker:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t droidtrace -f docker/Dockerfile .
+  e2e:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t droidtrace-e2e -f tests/e2e/Dockerfile .
+      - name: plugin engine
+        run: docker run --rm -v "$PWD":/src:ro droidtrace-e2e sh /src/tests/e2e/run.sh
+      - name: built-in engine
+        run: docker run --rm -v "$PWD":/src:ro droidtrace-e2e sh /src/tests/e2e/run_builtin.sh

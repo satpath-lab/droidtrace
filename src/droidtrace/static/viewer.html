@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DroidTrace Live</title>
+<style>
+:root{--bg:#f7f7f5;--panel:#fff;--fg:#1d1d1b;--muted:#6b6b66;--line:#e4e3de;--accent:#2f6fde;--chg:#fff1c2;--sel:#e7efff;--ok:#1f8a4c;--warn:#b26a00}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#141413;--panel:#1c1c1a;--fg:#ecebe6;--muted:#9a9993;--line:#2e2e2b;--accent:#6c9cff;--chg:#4a3d10;--sel:#22314f;--ok:#4cc27e;--warn:#e8a33d}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 -apple-system,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{font-size:15px;margin:0 8px 0 0}
+.stat{color:var(--muted)} .stat b{color:var(--fg);font-variant-numeric:tabular-nums}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);margin-right:6px}
+.live .dot{background:var(--ok)}
+input,button,select{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+button{cursor:pointer} button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+main{flex:1;display:flex;min-height:0}
+#libs{width:220px;border-right:1px solid var(--line);overflow:auto;padding:8px;background:var(--panel)}
+#libs div{display:flex;justify-content:space-between;padding:3px 6px;border-radius:4px;cursor:pointer}
+#libs div:hover,#libs div.sel{background:var(--sel)}
+#tbl{flex:1;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+table{border-collapse:collapse;width:100%}
+th{position:sticky;top:0;background:var(--panel);text-align:left;font-weight:600;border-bottom:1px solid var(--line);padding:4px 8px}
+td{padding:2px 8px;white-space:nowrap;border-bottom:1px solid var(--line)}
+tr:hover td{background:var(--sel)} tr.sel td{background:var(--sel)}
+td.n{color:var(--muted);text-align:right}
+#regs{width:300px;border-left:1px solid var(--line);overflow:auto;padding:8px;background:var(--panel);font-family:ui-monospace,Menlo,monospace;font-size:12px}
+#regs .r{padding:4px;border-bottom:1px solid var(--line)} #regs .r.c{background:var(--chg)}
+#regs .r b{display:inline-block;min-width:42px} #regs .k{color:var(--muted);display:inline-block;min-width:52px}
+#regs .best{font-weight:600} td.c{background:var(--chg)} td.s{color:var(--ok)}
+#regs{width:340px}
+.muted{color:var(--muted)}
+@media (max-width:800px){#libs,#regs{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <h1>DroidTrace Live</h1>
+  <span id="st" class="stat"><span class="dot"></span><span id="state">connecting…</span></span>
+  <span class="stat">instructions <b id="cnt">0</b></span>
+  <span class="stat">rate <b id="rate">0</b>/s</span>
+  <input id="flt" placeholder="filter: lib, mnemonic, address" size="28">
+  <button id="pause">Pause view</button>
+  <button id="follow" class="on">Auto-scroll</button>
+  <label class="stat">columns <select id="cols"><option value="all" selected>all registers</option><option value="args">arguments only</option><option value="none">none</option></select></label>
+  <label class="stat">keep <select id="keep"><option>1000</option><option selected>2000</option><option>20000</option></select> rows</label>
+</header>
+<main>
+  <div id="libs"><div class="muted">libraries</div></div>
+  <div id="tbl"><table><thead><tr id="hdr"><th>seq</th><th>library</th><th>offset</th><th>instruction</th><th>address</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div id="regs"><div class="muted">Click an instruction to see all registers (changed values highlighted).</div></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let regs=[],all=[],total=0,paused=false,follow=true,libSel=null,flt="",libCount={},lastN=0,selSeq=null;
+const keep=()=>+$("keep").value;
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
+function match(r){if(libSel&&r.lib!==libSel)return false;if(!flt)return true;const s=(r.lib+" "+r.insn+" "+r.va+" "+r.off).toLowerCase();return s.includes(flt)}
+let colIdx=[];
+// Deep links: ?find=<text> opens the first instruction whose registers contain <text>
+// (e.g. a decrypted URL), pauses there and shows its registers. ?cols=args|all|none.
+const params=new URLSearchParams(location.search);
+let pendingFind=(params.get("find")||"").toLowerCase()||null, focusSeq=null;
+if(params.get("cols")&&!params.get("cols").includes(","))document.getElementById("cols").value=params.get("cols");
+function setCols(){const custom=(params.get("cols")||"").includes(",")?params.get("cols").split(","):null;
+ if(custom){colIdx=custom.map(n=>regs.indexOf(n.trim())).filter(i=>i>=0);
+  $("hdr").innerHTML="<th>seq</th><th>library</th><th>offset</th><th>instruction</th><th>address</th>"+colIdx.map(i=>`<th>${esc(regs[i])}</th>`).join("");return}
+ const m=$("cols").value;const args=/^(x[0-7]|v[0-7]|rdi|rsi|rdx|rcx|r8|r9|rax|xmm[0-7])$/;
+ colIdx=regs.map((n,i)=>i).filter(i=>m==="all"||(m==="args"&&args.test(regs[i])));
+ $("hdr").innerHTML="<th>seq</th><th>library</th><th>offset</th><th>instruction</th><th>address</th>"+colIdx.map(i=>`<th>${esc(regs[i])}</th>`).join("")}
+const prevOf=new Map();
+function rowHtml(r){const p=prevOf.get(r.seq);return `<tr data-s="${r.seq}"${r.seq===selSeq?' class="sel"':""}><td class="n">${r.seq}</td><td>${esc(r.lib)}</td><td>0x${r.off}</td><td>${esc(r.insn)}</td><td class="muted">0x${r.va}</td>`+
+ colIdx.map(i=>{const v=r.r[i],ch=p&&p.r[i].hex!==v.hex;return `<td class="${ch?"c":""}${v.string!==undefined?" s":""}" title="${esc(v.hex)}">${esc(v.best.length>40?v.best.slice(0,40)+"…":v.best)}</td>`}).join("")+"</tr>"}
+function render(){let v=all.filter(match);if(focusSeq!==null){const i=v.findIndex(r=>r.seq===focusSeq);v=v.slice(Math.max(0,i-40),i+60)}else v=v.slice(-keep());$("rows").innerHTML=v.map(rowHtml).join("");if(follow)$("tbl").scrollTop=1e9}
+function renderLibs(){$("libs").innerHTML='<div class="muted">libraries — click to filter</div>'+Object.entries(libCount).sort((a,b)=>b[1]-a[1]).map(([l,c])=>`<div data-l="${esc(l)}" class="${l===libSel?"sel":""}"><span>${esc(l)}</span><span class="muted">${c}</span></div>`).join("")}
+const LABELS={string:"string",int:"int",uint:"uint",int32:"int32",bool:"bool",char:"char",double:"double",float:"float",ptr:"pointer",mem:"memory"};
+function showRegs(seq){selSeq=seq;const i=all.findIndex(r=>r.seq===seq);if(i<0)return;const r=all[i],p=prevOf.get(seq);
+ $("regs").innerHTML=`<div><b>#${r.seq}</b> ${esc(r.lib)}+0x${r.off}</div><div class="muted">${esc(r.insn)}</div><div class="muted">${r.v?"✓ target process verified":"process not verified"}</div>
+ <p class="muted">Registers have no type; every plausible reading is shown. Changed since previous instruction = highlighted.</p>`+
+ regs.map((n,k)=>{const v=r.r[k];return `<div class="r${p&&p.r[k].hex!==v.hex?" c":""}"><b>${esc(n)}</b> <span class="best">${esc(v.best)}</span><br>`+
+  `<span class="k">hex</span>${esc(v.hex)}`+Object.entries(LABELS).filter(([key])=>v[key]!==undefined&&v[key]!==v.best).map(([key,l])=>`<br><span class="k">${l}</span>${esc(v[key])}`).join("")+"</div>"}).join("");render()}
+$("rows").onclick=e=>{const tr=e.target.closest("tr");if(tr)showRegs(+tr.dataset.s)};
+$("libs").onclick=e=>{const d=e.target.closest("[data-l]");if(!d)return;libSel=libSel===d.dataset.l?null:d.dataset.l;renderLibs();render()};
+$("flt").oninput=e=>{flt=e.target.value.toLowerCase();render()};
+$("keep").onchange=render;
+$("cols").onchange=()=>{setCols();render()};
+$("pause").onclick=e=>{paused=!paused;if(!paused)focusSeq=null;e.target.classList.toggle("on",paused);e.target.textContent=paused?"Resume view":"Pause view";if(!paused)render()};
+$("follow").onclick=e=>{follow=!follow;e.target.classList.toggle("on",follow)};
+let dirty=false,lastRec=null;
+const once=params.get("once")==="1";
+function connect(){const es=new EventSource("/api/stream?from="+total+(once?"&once=1":""));
+ es.addEventListener("end",()=>{es.close();$("st").classList.remove("live");$("state").textContent="complete · "+total.toLocaleString()+" instructions"});
+ es.addEventListener("meta",e=>{const m=JSON.parse(e.data);if(!regs.length){regs=m.regs;setCols()}$("state").textContent=`live · ${m.arch}`;$("st").classList.add("live")});
+ es.onmessage=e=>{const b=JSON.parse(e.data);total+=b.length;for(const r of b){libCount[r.lib]=(libCount[r.lib]||0)+1;if(lastRec)prevOf.set(r.seq,lastRec);lastRec=r}if(prevOf.size>200000){const ks=[...prevOf.keys()].slice(0,100000);ks.forEach(k=>prevOf.delete(k))}all.push(...b);const cap=Math.max(keep()*4,20000);if(all.length>cap)all=all.slice(-cap);dirty=true;
+ if(pendingFind){const hit=all.find(r=>r.r.some(v=>v.string&&v.string.toLowerCase().includes(pendingFind)));
+  if(hit){pendingFind=null;focusSeq=hit.seq;paused=true;follow=false;$("pause").textContent="Resume view";$("pause").classList.add("on");$("follow").classList.remove("on");
+   showRegs(hit.seq);setTimeout(()=>{const tr=document.querySelector(`tr[data-s="${hit.seq}"]`);if(tr)tr.scrollIntoView({block:"center"})},50)}}};
+ es.onerror=()=>{if(once)return;$("st").classList.remove("live");$("state").textContent="reconnecting…";es.close();setTimeout(connect,2000)}}
+setInterval(()=>{$("cnt").textContent=total.toLocaleString();$("rate").textContent=(total-lastN).toLocaleString();lastN=total;renderLibs()},1000);
+setInterval(()=>{if(dirty&&!paused){dirty=false;render()}},300);
+fetch("/api/status").then(r=>r.json()).then(s=>{if(!regs.length)$("state").textContent=s.state});
+setInterval(()=>{if(!regs.length)fetch("/api/status").then(r=>r.json()).then(s=>$("state").textContent=s.state).catch(()=>{})},2000);
+connect();
+</script>
+</body>
+</html>

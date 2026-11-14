@@ -1,0 +1,12 @@
+name: Bug report
+description: Something isn't working
+body:
+  - type: textarea
+    attributes: {label: What happened?}
+    validations: {required: true}
+  - type: input
+    attributes: {label: QEMU version / guest image / arch}
+  - type: textarea
+    attributes: {label: Logs (qemu.log, CLI -vv output), render: text}
+  - type: markdown
+    attributes: {value: "**Never attach malware samples.** Provide SHA-256 hashes only."}
