@@ -9,4 +9,6 @@ DroidTrace executes **live malware**. Emulation is not a security boundary you s
   and a read-only root filesystem.
 - Store samples encrypted/zipped with a password; never commit them.
 - Traces can contain secrets the malware handles (keys, tokens) — treat them as sensitive.
+- `--internet` gives the sample real network access. Use it only on an isolated analysis
+  network, and expect the sample to contact its operators.
 - Make sure you are authorised to analyse each sample and comply with local law and policy.

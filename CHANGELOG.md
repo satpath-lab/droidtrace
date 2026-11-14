@@ -4,6 +4,28 @@ All notable changes are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-11-14
+
+### Added
+- **Phone screen in the viewer**: see the virtual phone live and click, swipe and type on it
+  (`📱 Phone` button, `?phone=1`, `--no-screen` to turn off).
+- **`--internet`**: optional internet access for the phone (off by default), with a working
+  default route and DNS.
+- **arm64-v8a**: clear message when an APK's native code doesn't match the phone's CPU, an
+  arm64 guide (`docs/arm64.md`), `--attach` to trace on an already-running device and
+  `droidtrace attach-env`.
+- Ready-made Docker image for x86_64 **and** arm64; `install.sh` downloads it instead of
+  compiling QEMU (`DROIDTRACE_BUILD=1` to build yourself).
+- **Split apps**: `.apks`, `.xapk`, `.apkm` or a folder of APKs, installed with
+  `adb install-multiple` and the matching CPU split.
+- Demo app: decrypts the URL every 2 seconds and has a **Reveal hidden URL** button.
+- README section on all installation options.
+
+### Changed
+- `prepare` skips Android's welcome wizard, keeps the screen on, turns off install
+  verification and waits for the phone to go quiet before saving the snapshot.
+- Dependabot now opens at most one grouped update per ecosystem per month.
+
 ## [0.1.0] - 2026-11-14
 
 First public release.

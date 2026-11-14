@@ -5,8 +5,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -14,10 +16,11 @@ from pathlib import Path
 
 from . import __version__
 from .adb import AdbClient
-from .apk import inspect_apk
+from .apk import ApkInfo, inspect_apk
 from .config import RunConfig
 from .emulator import Emulator, build_command, has_snapshot, snapshot_matches, trace_env
 from .maps import parse_maps, render_ranges, select_ranges, write_atomic
+from .phone import Phone
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +108,10 @@ def prepare(
         adb.wait_for_boot(cfg.boot_timeout, emu.alive)
         stop.set()
         adb.root()  # saved in the snapshot, so every run can read /proc/<pid>/maps
+        adb.prepare_device()
+        status("waiting for Android to finish its first-time background work")
+        if not adb.wait_idle():
+            log.warning("the phone stayed busy; saving the snapshot anyway")
         # Save with no adb client attached: a connection frozen into the snapshot
         # leaves adbd confused after restore ("offline").
         adb.disconnect()
@@ -119,12 +126,99 @@ def prepare(
     status(f"saved snapshot '{e.boot_snapshot}' in {e.state_disk}")
 
 
+def _trace_apk(
+    cfg: RunConfig,
+    adb: AdbClient,
+    package: str,
+    activity: str | None,
+    ranges_path: Path,
+    alive: Callable[[], bool],
+    status: Callable[[str], None],
+) -> None:
+    """Launch the app and keep the tracer's library list in sync with its memory map."""
+    adb.launch(package, activity)
+    status(f"running {package} for {cfg.duration:.0f}s")
+    deadline = time.monotonic() + cfg.duration
+    last_ranges = ""
+    pid: int | None = None
+    while time.monotonic() < deadline and alive():
+        new_pid = adb.pidof(package)
+        if new_pid != pid:
+            log.info("target pid: %s", new_pid)
+            pid = new_pid
+        if pid:
+            try:
+                sel = select_ranges(
+                    parse_maps(adb.read_maps(pid)),
+                    cfg.trace.libraries,
+                    cfg.trace.exclude,
+                    cfg.trace.anchors,
+                )
+                text = render_ranges(sel)
+                if text != last_ranges:  # new dlopen() / process restart
+                    write_atomic(ranges_path, text)
+                    last_ranges = text
+                    log.info("updated ranges: %d mappings", len(sel))
+            except Exception as e:  # process may die mid-read
+                log.debug("maps read failed: %s", e)
+        time.sleep(cfg.trace.maps_poll_interval)
+    adb.force_stop(package)
+
+
+def _run_attached(
+    cfg: RunConfig,
+    apk_path: Path,
+    out_dir: Path,
+    info: ApkInfo,
+    package: str,
+    trace_path: Path,
+    ranges_path: Path,
+    manifest: dict[str, object],
+    status: Callable[[str], None],
+    on_phone: Callable[[Phone], None] | None,
+) -> Path:
+    """Trace on a device that is already running on the patched QEMU (see docs/arm64.md).
+
+    That QEMU must have been started with DROIDTRACE_OUT=<out_dir>/trace.dtr and
+    DROIDTRACE_RANGES=<out_dir>/ranges.txt in its environment (`droidtrace attach-env`).
+    """
+    assert cfg.attach
+    adb = AdbClient(cfg.attach)
+    status(f"attaching to {cfg.attach}")
+    adb.wait_for_boot(cfg.boot_timeout)
+    adb.root()
+    adb.prepare_device()
+    if on_phone and cfg.emulator.monitor_socket and Path(cfg.emulator.monitor_socket).exists():
+        on_phone(Phone(cfg.emulator.monitor_socket, adb))
+    status(f"installing {apk_path.name}")
+    adb.install(info.install_files(adb.abilist()))
+    _trace_apk(
+        cfg,
+        adb,
+        package,
+        cfg.activity or info.launchable_activity,
+        ranges_path,
+        lambda: True,
+        status,
+    )
+    manifest["finished"] = time.time()
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    status("finished (the device keeps running; stop it yourself)")
+    return trace_path
+
+
 def run(
     cfg: RunConfig,
     apk_path: Path,
     out_dir: Path,
     status: Callable[[str], None] = lambda s: log.info(s),
+    on_phone: Callable[[Phone], None] | None = None,
 ) -> Path:
+    if cfg.emulator.monitor_socket is None:
+        # needed for the phone screen; unix socket paths must stay short, so use the temp dir
+        cfg.emulator.monitor_socket = str(
+            Path(tempfile.gettempdir()) / f"dt-mon-{os.getpid()}.sock"
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     info = inspect_apk(apk_path)
     package = cfg.package or info.package
@@ -149,6 +243,19 @@ def run(
 
     cmd = build_command(cfg.emulator, cfg.trace, trace_path, ranges_path)
     adb = AdbClient(f"127.0.0.1:{cfg.emulator.adb_host_port}")
+    if cfg.attach:
+        return _run_attached(
+            cfg,
+            apk_path,
+            out_dir,
+            info,
+            package,
+            trace_path,
+            ranges_path,
+            manifest,
+            status,
+            on_phone,
+        )
     status("starting emulator")
     env = trace_env(cfg.emulator, cfg.trace, trace_path, ranges_path)
     with Emulator(cmd, out_dir / "qemu.log", env) as emu:
@@ -176,36 +283,34 @@ def run(
         # Keep re-applying the console setup for the whole run: Android's network
         # manager can drop the routing rule at any time, which silently cuts adb off.
         adb.root()
-        status(f"installing {apk_path.name}")
-        adb.install(apk_path)
-        adb.launch(package, cfg.activity or info.launchable_activity)
-
-        status(f"running {package} for {cfg.duration:.0f}s")
-        deadline = time.monotonic() + cfg.duration
-        last_ranges = ""
-        pid: int | None = None
-        while time.monotonic() < deadline and emu.alive():
-            new_pid = adb.pidof(package)
-            if new_pid != pid:
-                log.info("target pid: %s", new_pid)
-                pid = new_pid
-            if pid:
-                try:
-                    sel = select_ranges(
-                        parse_maps(adb.read_maps(pid)),
-                        cfg.trace.libraries,
-                        cfg.trace.exclude,
-                        cfg.trace.anchors,
-                    )
-                    text = render_ranges(sel)
-                    if text != last_ranges:  # new dlopen() / process restart
-                        write_atomic(ranges_path, text)
-                        last_ranges = text
-                        log.info("updated ranges: %d mappings", len(sel))
-                except Exception as e:  # process may die mid-read
-                    log.debug("maps read failed: %s", e)
-            time.sleep(cfg.trace.maps_poll_interval)
-        adb.force_stop(package)
+        adb.prepare_device()
+        if cfg.emulator.network == "internet":
+            adb.enable_internet()
+            status("internet access ON for the phone (the app can reach real servers)")
+        if on_phone and cfg.emulator.monitor_socket:
+            on_phone(Phone(cfg.emulator.monitor_socket, adb))
+        phone_abis = adb.abilist()
+        if info.abis and phone_abis and not set(info.abis) & set(phone_abis):
+            raise ValueError(
+                f"this APK only contains native code for {', '.join(info.abis)}, but this "
+                f"virtual phone runs {', '.join(phone_abis)}. Use a matching Android image "
+                "(for arm64-v8a apps see docs/arm64.md)."
+            )
+        files = info.install_files(phone_abis)
+        status(
+            f"installing {apk_path.name}"
+            + (f" ({len(files)} split APKs)" if len(files) > 1 else "")
+        )
+        adb.install(files)
+        _trace_apk(
+            cfg,
+            adb,
+            package,
+            cfg.activity or info.launchable_activity,
+            ranges_path,
+            emu.alive,
+            status,
+        )
         stop_console.set()
         status("stopping emulator, flushing trace")
 

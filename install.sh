@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# DroidTrace installer: builds the sandbox image (QEMU + plugin + CLI) and installs
-# a `droidtrace` command that runs it. Requires Docker.
+# DroidTrace installer: gets the sandbox image (QEMU + tracer + CLI) and installs a
+# `droidtrace` command that runs it. Requires Docker.
+#   DROIDTRACE_BUILD=1 ./install.sh   build the image yourself instead of downloading it
 #   curl -fsSL https://raw.githubusercontent.com/satpath-lab/droidtrace/main/install.sh | bash
 set -euo pipefail
 REPO_URL="${DROIDTRACE_REPO:-https://github.com/satpath-lab/droidtrace.git}"
@@ -16,8 +17,15 @@ if [ ! -f "$SRC/docker/Dockerfile" ]; then
   if [ -d "$SRC/.git" ]; then git -C "$SRC" pull -q; else git clone -q --depth 1 "$REPO_URL" "$SRC"; fi
 fi
 
-echo "==> Building sandbox image (first build compiles QEMU, ~10 min)"
-docker build -t droidtrace:local -f "$SRC/docker/Dockerfile" "$SRC"
+IMAGE="${DROIDTRACE_IMAGE:-ghcr.io/satpath-lab/droidtrace:latest}"
+if [ "${DROIDTRACE_BUILD:-0}" != "1" ] && echo "==> Downloading the ready-made image ($IMAGE)" \
+   && docker pull "$IMAGE"; then
+  docker tag "$IMAGE" droidtrace:local
+else
+  echo "==> Building the image locally (compiles QEMU, about 15 minutes)"
+  docker build -t droidtrace:local -f "$SRC/docker/Dockerfile" "$SRC"
+  docker builder prune -af >/dev/null 2>&1 || true   # build cache is several GB
+fi
 
 mkdir -p "$BIN_DIR" "$HOME_DIR/images/arm64"
 cat > "$BIN_DIR/droidtrace" <<'WRAP'
@@ -36,6 +44,7 @@ esac
 exec docker run --rm $TTY --init \
   --cap-drop ALL --security-opt no-new-privileges \
   -p "127.0.0.1:$PORT:8765" \
+  -e DROIDTRACE_HOME=/home/analyst/.droidtrace \
   -v "$PWD:/work" -v "$HOME_DIR:/home/analyst/.droidtrace" \
   droidtrace:local "$@" "${EXTRA[@]}"
 WRAP

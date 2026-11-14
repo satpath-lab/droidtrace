@@ -5,6 +5,6 @@ authors:
   - alias: satpath-lab
 repository-code: "https://github.com/satpath-lab/droidtrace"
 license: Apache-2.0
-version: 0.1.0
+version: 0.1.1
 date-released: 2026-11-14
 keywords: [android, malware-analysis, qemu, dynamic-analysis, instruction-tracing]

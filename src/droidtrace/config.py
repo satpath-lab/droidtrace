@@ -56,7 +56,9 @@ class EmulatorConfig(BaseModel):
     # connection knocks ours offline.
     adb_host_port: int = 15555
     snapshot: bool = True  # -snapshot: never write to base images
-    network: Literal["isolated", "restricted"] = "isolated"
+    # isolated: no internet for the phone (safe default for malware)
+    # internet: the phone can reach the internet through the host (some apps need it)
+    network: Literal["isolated", "internet"] = "isolated"
 
 
 def _img(name: str) -> str | None:
@@ -81,6 +83,9 @@ class RunConfig(BaseModel):
     duration: float = 120.0
     boot_timeout: float = 1200.0
     package: str | None = None
+    # Use an Android device that is already running on the patched QEMU (e.g. Cuttlefish arm64)
+    # instead of starting one. Value: its adb serial, e.g. "127.0.0.1:6520".
+    attach: str | None = None
     activity: str | None = None
 
     @classmethod

@@ -33,7 +33,7 @@ def main(verbose: int) -> None:
 
 
 @main.command()
-@click.argument("apk", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("apk", type=click.Path(exists=True, path_type=Path))
 @click.option("--config", type=click.Path(exists=True, path_type=Path), help="YAML run config")
 @click.option("--out", type=click.Path(path_type=Path), help="Output dir")
 @click.option("--duration", type=float, help="Seconds to run the app (default 120)")
@@ -44,7 +44,23 @@ def main(verbose: int) -> None:
     type=click.Choice(["builtin", "plugin"]),
     help="Tracer: built into patched QEMU (fast, default) or TCG plugin",
 )
+@click.option(
+    "--attach",
+    metavar="SERIAL",
+    help="Trace on an Android device already running on the patched QEMU (see docs/arm64.md)",
+)
 @click.option("--max-size", "max_size", type=int, help="Max trace size in MB (default 2048)")
+@click.option(
+    "--internet",
+    is_flag=True,
+    help="Let the phone reach the internet (off by default: malware could do real harm)",
+)
+@click.option(
+    "--screen/--no-screen",
+    default=True,
+    show_default=True,
+    help="Show the phone screen in the viewer and let you click on it",
+)
 @click.option("--live/--no-live", default=True, show_default=True, help="Live web viewer")
 @click.option("--port", default=8765, show_default=True)
 @click.option("--host", default="127.0.0.1", hidden=True)
@@ -57,13 +73,19 @@ def run(
     libs: str | None,
     package: str | None,
     engine: str | None,
+    attach: str | None,
     max_size: int | None,
+    internet: bool,
+    screen: bool,
     live: bool,
     port: int,
     host: str,
     no_browser: bool,
 ) -> None:
-    """Run APK in the sandbox and record (and show live) its instruction trace."""
+    """Run an app and record (and show live) its instruction trace.
+
+    APP can be an .apk, a split app (.apks, .xapk, .apkm) or a folder of split APKs.
+    """
     from .doctor import checks
     from .runner import run as do_run
 
@@ -76,9 +98,24 @@ def run(
         cfg.package = package
     if engine:
         cfg.emulator.engine = engine  # type: ignore[assignment]
+    if attach:
+        cfg.attach = attach
+    if internet:
+        cfg.emulator.network = "internet"
+        click.secho(
+            "⚠ Internet is ON: the app can contact real servers. "
+            "Only do this on an isolated analysis machine.",
+            fg="yellow",
+            err=True,
+        )
     if max_size:
         cfg.trace.max_bytes = max_size * 1_000_000
-    bad = [c for c in checks(cfg) if not c[1] and not c[0].startswith("aapt")]
+    needed = {"adb"} if cfg.attach else None  # attached device: only adb is required here
+    bad = [
+        c
+        for c in checks(cfg)
+        if not c[1] and not c[0].startswith("aapt") and (needed is None or c[0] in needed)
+    ]
     if bad:
         for name, _, msg in bad:
             click.secho(f"✗ {name}: {msg}", fg="red", err=True)
@@ -100,7 +137,8 @@ def run(
             viewer.set_state(s)
 
     try:
-        trace = do_run(cfg, apk, out, status)
+        on_phone = viewer.attach_phone if (viewer and screen) else None
+        trace = do_run(cfg, apk, out, status, on_phone)
     except KeyboardInterrupt:
         click.echo("interrupted")
         trace = out / "trace.dtr"
@@ -124,6 +162,16 @@ def prepare(config: Path | None) -> None:
     do_prepare(
         RunConfig.load(config), Path("runs") / "prepare", lambda s: click.echo(f"[droidtrace] {s}")
     )
+
+
+@main.command("attach-env")
+@click.option("--out", required=True, type=click.Path(path_type=Path), help="Run folder")
+def attach_env(out: Path) -> None:
+    """Print the environment to start your own patched QEMU with, for `run --attach`."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "ranges.txt").touch()
+    click.echo(f"export DROIDTRACE_OUT={(out / 'trace.dtr').resolve()}")
+    click.echo(f"export DROIDTRACE_RANGES={(out / 'ranges.txt').resolve()}")
 
 
 @main.command()

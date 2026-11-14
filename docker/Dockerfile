@@ -19,6 +19,9 @@ RUN cmake -S /src/droidtrace/plugin -B /src/build -DQEMU_SRC=/src/qemu -DCMAKE_B
  && cmake --build /src/build -j
 
 FROM debian:trixie
+LABEL org.opencontainers.image.source="https://github.com/satpath-lab/droidtrace" \
+      org.opencontainers.image.description="DroidTrace: see every instruction an Android app runs" \
+      org.opencontainers.image.licenses="Apache-2.0"
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libglib2.0-0t64 libpixman-1-0 libslirp0 libfdt1 python3 python3-pip python3-venv adb aapt \
     && rm -rf /var/lib/apt/lists/* && useradd -m analyst

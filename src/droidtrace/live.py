@@ -11,7 +11,7 @@ from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 from .disasm import disassemble
@@ -19,6 +19,9 @@ from .follow import TraceFollower
 from .format import Arch
 from .reader import Record, Trace
 from .values import interpret
+
+if TYPE_CHECKING:
+    from .phone import Phone
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +66,13 @@ class _Handler(BaseHTTPRequestHandler):
         if u.path == "/":
             html = files("droidtrace").joinpath("static/viewer.html").read_bytes()
             self._send(200, html, "text/html; charset=utf-8")
+        elif u.path == "/api/screen":
+            phone = self.server.phone
+            png = phone.screenshot() if phone else None
+            if png is None:
+                self._send(404, b"no phone screen in this session", "text/plain")
+            else:
+                self._send(200, png, "image/png")
         elif u.path == "/api/status":
             self._send(200, json.dumps(self.server.status()).encode(), "application/json")
         elif u.path == "/api/stream":
@@ -70,6 +80,35 @@ class _Handler(BaseHTTPRequestHandler):
             self._stream(int(q.get("from", ["0"])[0]), once=q.get("once", ["0"])[0] == "1")
         else:
             self._send(404, b"not found", "text/plain")
+
+    def do_POST(self) -> None:  # noqa: N802
+        phone = self.server.phone
+        if phone is None or urlparse(self.path).path != "/api/input":
+            self._send(404, b"not found", "text/plain")
+            return
+        # Only accept same-origin requests from the viewer page (blocks drive-by websites).
+        origin = self.headers.get("Origin")
+        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+            self._send(403, b"forbidden", "text/plain")
+            return
+        try:
+            n = min(int(self.headers.get("Content-Length", "0")), 4096)
+            req = json.loads(self.rfile.read(n) or b"{}")
+            kind = req.get("type")
+            if kind == "tap":
+                phone.tap(int(req["x"]), int(req["y"]))
+            elif kind == "swipe":
+                phone.swipe(int(req["x1"]), int(req["y1"]), int(req["x2"]), int(req["y2"]))
+            elif kind == "key":
+                phone.key(str(req["key"]))
+            elif kind == "text":
+                phone.text(str(req["text"])[:500])
+            else:
+                raise ValueError(kind)
+        except (ValueError, KeyError, TypeError):
+            self._send(400, b"bad request", "text/plain")
+            return
+        self._send(200, b"{}", "application/json")
 
     def _stream(self, start: int, once: bool = False) -> None:
         self.send_response(200)
@@ -103,6 +142,7 @@ class _Server(ThreadingHTTPServer):
 
     def __init__(self, addr: tuple[str, int], trace_path: Path) -> None:
         super().__init__(addr, _Handler)
+        self.phone: Phone | None = None
         self.trace_path = trace_path
         self.stopping = threading.Event()
         self.state = "waiting for trace"
@@ -112,6 +152,7 @@ class _Server(ThreadingHTTPServer):
         return {
             "state": self.state,
             "trace": str(p),
+            "phone": self.phone is not None,
             "bytes": p.stat().st_size if p.exists() else 0,
         }
 
@@ -123,6 +164,10 @@ class LiveViewer:
         self.server = _Server((host, port), trace_path)
         self.url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}/"
         self._t = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def attach_phone(self, phone: Phone) -> None:
+        """Show the phone's screen in the viewer and let clicks control it."""
+        self.server.phone = phone
 
     def set_state(self, s: str) -> None:
         self.server.state = s

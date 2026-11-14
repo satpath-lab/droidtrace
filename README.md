@@ -20,6 +20,9 @@ turned into something you can read: text, numbers, pointers.
 text shows up in register <code>rdi</code> the moment it is written.</sub>
 
 [Quick start](#-quick-start) •
+[Install](#-installation-options) •
+[Phone screen](#-using-the-app-while-it-is-traced) •
+[arm64](#-arm64-v8a-apps) •
 [How it works](#-how-it-works) •
 [Screenshots](#-screenshots) •
 [Limitations](#%EF%B8%8F-limitations) •
@@ -85,6 +88,7 @@ And in the live viewer you can watch the URL being built, one letter per loop ro
 | 🔤 **Meaning** | values turned into plain text: `"http://evil.example/gate"`, `-1`, `3.14`, `'e'`, `libc.so+0x1234` |
 | 🎯 **Focus** | only the app you are analysing is recorded, not the rest of the phone |
 | 📡 **Live** | everything streams into your browser while the app is running |
+| 📱 **Interactive** | see the phone's screen in the browser and click, swipe and type on it |
 | 💾 **Export** | save the trace and export it to JSONL, CSV or Parquet |
 
 ## 🚀 Quick start
@@ -94,7 +98,7 @@ installed), and **8 GB of RAM** (the virtual phone uses 2 GB). I built and teste
 8 GB Apple Silicon Mac; Linux works too.
 
 ```bash
-# 1. Get the code and install the `droidtrace` command
+# 1. Get the code and install the `droidtrace` command (downloads a ready-made image)
 git clone https://github.com/satpath-lab/droidtrace.git
 cd droidtrace
 ./install.sh
@@ -116,10 +120,131 @@ Your browser opens at **http://127.0.0.1:8765** and the trace starts flowing.
 > ```bash
 > droidtrace run tests/apk/droidtrace-demo.apk --config configs/android-x86.yaml
 > ```
-> Then open **http://127.0.0.1:8765/?find=gate** to jump straight to the moment it is decrypted.
+> The app decrypts the URL every 2 seconds. Open **http://127.0.0.1:8765/?find=gate** to jump
+> straight to that moment, or click **📱 Phone** and tap the app's **Reveal hidden URL** button
+> to trigger it yourself.
 
 Not sure everything is set up? Run `droidtrace doctor`: it checks each piece and tells you
 what is missing.
+
+## 🧰 Installation options
+
+Pick whichever suits you. All of them give you the same `droidtrace` command.
+
+<details open>
+<summary><b>1. Installer (easiest)</b></summary>
+
+```bash
+git clone https://github.com/satpath-lab/droidtrace.git
+cd droidtrace
+./install.sh
+```
+
+It downloads the ready-made Docker image and installs a `droidtrace` command in
+`~/.local/bin`. Nothing else is installed on your machine. To build the image yourself
+instead of downloading it: `DROIDTRACE_BUILD=1 ./install.sh`.
+</details>
+
+<details>
+<summary><b>2. Docker image from GitHub Packages</b></summary>
+
+Every version is published at
+[ghcr.io/satpath-lab/droidtrace](https://github.com/satpath-lab/droidtrace/pkgs/container/droidtrace)
+for x86_64 and arm64 (Apple Silicon included). No login needed.
+
+```bash
+docker pull ghcr.io/satpath-lab/droidtrace:latest      # or a fixed version, e.g. :v0.1.0
+
+# run any droidtrace command; your current folder is available inside as /work
+docker run --rm -it -v "$PWD:/work" -p 127.0.0.1:8765:8765 \
+  ghcr.io/satpath-lab/droidtrace:latest \
+  run app.apk --config configs/android-x86.yaml --host 0.0.0.0 --no-browser
+```
+
+Then open http://127.0.0.1:8765. (The installer above simply wraps this `docker run` for you.)
+</details>
+
+<details>
+<summary><b>3. Build the Docker image yourself</b></summary>
+
+```bash
+git clone https://github.com/satpath-lab/droidtrace.git && cd droidtrace
+docker build -t droidtrace:local -f docker/Dockerfile .   # compiles QEMU, about 15 minutes
+docker builder prune -af                                 # optional: frees several GB of build cache
+```
+
+Use `droidtrace:local` in place of the image name above, or run `./install.sh` afterwards.
+Building yourself is useful when your organisation requires building from source.
+</details>
+
+<details>
+<summary><b>4. Python package from Releases (no Docker)</b></summary>
+
+For Linux machines where you manage QEMU yourself. Download the `.whl` file from the
+[Releases page](https://github.com/satpath-lab/droidtrace/releases) and install it:
+
+```bash
+pip install droidtrace-0.1.1-py3-none-any.whl
+# or straight from GitHub:
+pip install "droidtrace[disasm,parquet] @ git+https://github.com/satpath-lab/droidtrace@v0.1.1"
+```
+
+You also need, on the same machine:
+
+- **QEMU 10.0.3 with the tracer**: apply `qemu-patch/apply.sh` to the QEMU source and build
+  it (fast engine), or build the plugin with `make plugin QEMU_SRC=...` (plugin engine)
+- **adb** and **aapt2** from the Android SDK platform-tools / build-tools
+
+Then run `droidtrace doctor` to check everything is found.
+</details>
+
+## 📱 Using the app while it is traced
+
+Some behaviour only happens after you do something: log in, press a button, open a screen.
+Click **📱 Phone** in the viewer to see the virtual phone's screen live:
+
+- **click** to tap, **drag** to swipe
+- **◀ ● ■** for Back, Home and Recent apps
+- type in the text box and press Enter to send text to the focused field
+
+Right after a run starts, Android may show **"System UI isn't responding"** for a moment
+(the phone's clock jumps when the saved snapshot is restored). Tap **Wait** in the panel; the
+app keeps running underneath.
+
+Everything you trigger shows up in the trace as it runs. Add `?phone=1` to the viewer address
+to open the phone panel straight away.
+
+<img src="docs/images/phone-panel.png" alt="Phone panel next to the live trace" width="960">
+
+<sub>The demo app on the virtual phone (right), while its native library's instructions stream in
+on the left.</sub>
+
+## 🌐 Apps that need the internet
+
+By default the phone has **no internet**. That is the safe choice for malware: it cannot
+download more code, steal data or attack anything.
+
+Some apps (and some malware) do nothing interesting until they reach their server. When you
+need that, turn the internet on for one run:
+
+```bash
+droidtrace run app.apk --config configs/android-x86.yaml --internet
+```
+
+The app can then reach real servers through your machine's connection. **Only do this on an
+isolated analysis machine** (a spare computer or a VM on a separate network), never on your
+work laptop or office network.
+
+Expect the phone to be slower with internet on: Google services on the phone start syncing
+and downloading, which keeps the emulated CPU busy. Give the run more time (`--duration`).
+
+## 📦 arm64-v8a apps
+
+Most apps ship native code only for `arm64-v8a`. The quick-start phone (Android-x86) runs
+x86_64 code, so it cannot run those libraries; DroidTrace detects this and tells you before it
+installs anything. The fast tracer itself is built for arm64. To trace arm64-v8a apps, run an
+arm64 Android (Google's Cuttlefish) on the patched QEMU and connect with `--attach`. The full
+steps are in [docs/arm64.md](docs/arm64.md).
 
 ## 🧭 How it works
 
@@ -170,11 +295,15 @@ On row 3815, `call qword ptr [rax + 0x538]` is the native code calling Android's
 |---|---|
 | check my setup | `droidtrace doctor` |
 | run an app and watch it | `droidtrace run app.apk` |
+| run a split app (from Google Play / APKMirror / bundletool) | `droidtrace run app.apks` (also `.xapk`, `.apkm`, or a folder of `.apk` files) |
 | follow specific libraries | `droidtrace run app.apk --libs 'libnative*.so,libc.so'` |
 | watch for longer | `droidtrace run app.apk --duration 300` |
 | keep traces small | `droidtrace run app.apk --max-size 500` (MB) |
 | reopen a saved trace | `droidtrace view runs/<run>/trace.dtr` |
 | jump to a string | open the viewer with `?find=<text>`, e.g. `http://127.0.0.1:8765/?find=gate` |
+| let the app use the internet | `droidtrace run app.apk --internet` |
+| skip the phone screen | `droidtrace run app.apk --no-screen` |
+| use a phone that's already running (e.g. arm64) | `droidtrace run app.apk --attach 127.0.0.1:6520` |
 | get the data out | `droidtrace export runs/<run>/trace.dtr --format csv -o trace.csv` |
 | summarise a trace | `droidtrace info runs/<run>/trace.dtr` |
 
@@ -217,6 +346,10 @@ Untraced code: about 2-5 % overhead with the plugin, none with the built-in engi
 | Live viewer, `view`, `info`, export to JSONL / CSV / Parquet | ✅ |
 | Built-in and plugin engines produce identical traces (arm64 test program on real QEMU) | ✅ |
 | Size cap stops recording before the disk fills | ✅ |
+| Phone screen shown in the browser; clicking it taps the phone (dismissed a dialog) | ✅ |
+| `--internet`: the phone reaches real servers and resolves names (DNS) | ✅ |
+| APK built only for another CPU type is detected before installing | ✅ (unit test) |
+| Split apps (`.apks`, `.xapk`, `.apkm`, folder): the right CPU split is chosen | ✅ (unit tests) |
 | Automated checks: unit tests, linting, type checking, end-to-end tests in CI | ✅ |
 | Full arm64 Android image (AOSP / Cuttlefish) | ⏳ next, see limitations |
 
@@ -231,19 +364,24 @@ I want you to know exactly what DroidTrace can and cannot do:
   not shown as Java source. DroidTrace is built for `.so` libraries.
 - **Traces grow fast.** Each instruction takes a few hundred bytes, so millions of instructions
   mean gigabytes. A size cap (2 GB by default) stops recording when it is reached.
-- **arm64 Android is not tested end to end yet.** The fast built-in engine is tested on arm64
-  programs, and the full Android flow on Android-x86. A real arm64 Android image (AOSP or
-  Cuttlefish) is my next step.
-- **x86_64 Android needs x86_64 libraries in the APK.** Many apps ship arm64 code only; those
-  need an arm64 Android image.
+- **arm64-v8a apps need an arm64 Android.** The quick-start phone is x86_64 and cannot run
+  arm64-only native code. The arm64 path (Cuttlefish + `--attach`, see
+  [docs/arm64.md](docs/arm64.md)) is built but not tested end to end yet; the fast tracer
+  itself is tested on arm64 programs.
 - **The Android Studio emulator cannot be used.** It is based on a very old QEMU without
   tracing support.
-- **The phone's screen is not shown.** Android runs without a display; you see what the app
-  does through the trace.
+- **Internet is off by default.** Use `--internet` when an app needs it, and only on an isolated
+  machine. Some apps also check whether Google Play services or a real SIM card are present,
+  which this virtual phone does not have.
 - **Some malware hides from emulators.** Apps that detect emulation may behave differently or do
   nothing. Packed or anti-tamper protected apps were not tested.
 - **Text is best-effort.** It is shown when a register points at readable memory; only the
   first 32 bytes are captured.
+- **Apps protected by Google Play (e.g. PairIP, Play Integrity) usually won't run normally.**
+  They check that they were installed from the Play Store on a certified, unrooted, real
+  device, and this phone is none of those. They typically show an error or close. Their
+  native protection code still runs first, so you can trace what it checks, but DroidTrace
+  does not try to bypass these protections.
 - **The fast engine is pinned to QEMU 10.0.3.** Other QEMU versions need the plugin engine or a
   small update to the patch.
 
@@ -251,8 +389,9 @@ I want you to know exactly what DroidTrace can and cannot do:
 
 I designed DroidTrace so a security team can adopt it without surprises:
 
-- **Isolated by default.** No internet for the phone, a clean snapshot on every run, the viewer
-  only listens on `127.0.0.1`, and the container runs without extra privileges.
+- **Isolated by default.** No internet for the phone unless you ask for it (`--internet`), a
+  clean snapshot on every run, the viewer only listens on `127.0.0.1`, and the container runs
+  without extra privileges.
 - **Reproducible.** Pinned QEMU version, versioned trace format, one Docker image, and a
   `manifest.json` per run with the APK's SHA-256 and the exact settings.
 - **Bounded.** Hard limits on trace size and phone memory, so a run cannot exhaust a host.
@@ -260,6 +399,8 @@ I designed DroidTrace so a security team can adopt it without surprises:
   Parquet), easy to drive from a pipeline or a job queue.
 - **Open and auditable.** Apache-2.0 code, documented file format, CI with tests, linting,
   type checking, CodeQL and Dependabot.
+- **Ready-made builds.** Every version is published as a Docker image for x86_64 and arm64
+  (`ghcr.io/satpath-lab/droidtrace`) and as a Python package on the Releases page.
 
 Read [docs/deployment.md](docs/deployment.md) for running it on shared or air-gapped
 infrastructure, and [SECURITY.md](SECURITY.md) for how to report problems.
@@ -279,6 +420,38 @@ isolation on, and read [docs/safety.md](docs/safety.md).
 Frida is great for hooking specific functions. DroidTrace records <i>everything</i> a library
 does, without injecting anything into the app, which is harder for malware to notice and gives
 you a complete history to search afterwards.
+</details>
+
+<details>
+<summary><b>Why no hardware acceleration (KVM / Apple Hypervisor)?</b></summary>
+
+With hardware acceleration the real CPU runs the app's code directly, and QEMU never sees the
+individual instructions, so there is nothing to record. Tracing needs QEMU's software CPU,
+which translates every instruction, and that is what makes the phone slower. DroidTrace keeps
+the cost down by only recording the libraries you follow and by booting Android only once
+(`prepare`).
+</details>
+
+<details>
+<summary><b>Will apps that need Google Play (PairIP / Play Integrity) work?</b></summary>
+
+Usually not normally: see the limitation above. You can still trace the protection code
+itself, which is often exactly what you want to study.
+</details>
+
+<details>
+<summary><b>Can I run split APKs (.apks / .xapk / .apkm)?</b></summary>
+
+Yes. Pass the file (or a folder of `.apk` files) to `droidtrace run`. DroidTrace installs the
+base APK, the language and screen splits, and the CPU split that matches the phone.
+</details>
+
+<details>
+<summary><b>What are the Releases and Packages on GitHub?</b></summary>
+
+Each version I publish (for example v0.1.0) appears under **Releases** with its notes and the
+Python package files. **Packages** holds the ready-made Docker image, which `./install.sh`
+downloads so you don't have to compile QEMU yourself.
 </details>
 
 <details>

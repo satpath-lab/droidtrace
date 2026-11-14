@@ -81,7 +81,7 @@ def build_command(
     # isolated: only the adb port is forwarded, guest has no route to the internet.
     netdev = f"user,id=n0,hostfwd=tcp:127.0.0.1:{emu.adb_host_port}-:5555"
     if emu.network == "isolated":
-        netdev += ",restrict=on"
+        netdev += ",restrict=on"  # guest cannot open connections to anything but the host forward
     cmd = [
         qemu,
         "-accel",

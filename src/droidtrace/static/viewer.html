@@ -33,6 +33,12 @@ td.n{color:var(--muted);text-align:right}
 #regs{width:340px}
 .muted{color:var(--muted)}
 @media (max-width:800px){#libs,#regs{display:none}}
+#phone{position:fixed;right:16px;top:64px;width:min(460px,calc(100vw - 32px));background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 12px 40px #0006;padding:10px;display:none;z-index:10}
+#phone.open{display:block}
+#phone .hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+#scr{width:100%;border-radius:8px;cursor:crosshair;background:#000;display:block;user-select:none;-webkit-user-drag:none}
+#phone .ctl{display:flex;gap:6px;margin-top:8px}#phone .ctl input{flex:1}
+#tapdot{position:absolute;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:#2f6fde88;pointer-events:none;display:none}
 </style>
 </head>
 <body>
@@ -44,6 +50,7 @@ td.n{color:var(--muted);text-align:right}
   <input id="flt" placeholder="filter: lib, mnemonic, address" size="28">
   <button id="pause">Pause view</button>
   <button id="follow" class="on">Auto-scroll</button>
+  <button id="phoneBtn" style="display:none" title="Show the phone screen; click it to interact">📱 Phone</button>
   <label class="stat">columns <select id="cols"><option value="all" selected>all registers</option><option value="args">arguments only</option><option value="none">none</option></select></label>
   <label class="stat">keep <select id="keep"><option>1000</option><option selected>2000</option><option>20000</option></select> rows</label>
 </header>
@@ -52,6 +59,10 @@ td.n{color:var(--muted);text-align:right}
   <div id="tbl"><table><thead><tr id="hdr"><th>seq</th><th>library</th><th>offset</th><th>instruction</th><th>address</th></tr></thead><tbody id="rows"></tbody></table></div>
   <div id="regs"><div class="muted">Click an instruction to see all registers (changed values highlighted).</div></div>
 </main>
+<div id="phone"><div class="hd"><b>📱 Phone</b><span class="muted" id="phoneHint">click to tap · drag to swipe</span><button id="phoneClose">✕</button></div>
+ <div style="position:relative"><img id="scr" alt="phone screen" draggable="false"><div id="tapdot"></div></div>
+ <div class="ctl"><button data-k="back" title="Back">◀</button><button data-k="home" title="Home">●</button><button data-k="recents" title="Recent apps">■</button>
+ <input id="typeBox" placeholder="type text, press Enter"></div></div>
 <script>
 const $=id=>document.getElementById(id);
 let regs=[],all=[],total=0,paused=false,follow=true,libSel=null,flt="",libCount={},lastN=0,selSeq=null;
@@ -102,6 +113,19 @@ setInterval(()=>{$("cnt").textContent=total.toLocaleString();$("rate").textConte
 setInterval(()=>{if(dirty&&!paused){dirty=false;render()}},300);
 fetch("/api/status").then(r=>r.json()).then(s=>{if(!regs.length)$("state").textContent=s.state});
 setInterval(()=>{if(!regs.length)fetch("/api/status").then(r=>r.json()).then(s=>$("state").textContent=s.state).catch(()=>{})},2000);
+// ---- phone screen: live picture of the virtual phone; clicks and keys are sent to it ----
+let phoneOn=false,phoneTimer=null,down=null;
+async function input(o){try{await fetch("/api/input",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(o)})}catch(e){}}
+function refreshScreen(){if(!phoneOn)return;fetch("/api/screen?t="+Date.now()).then(r=>r.ok?r.blob():null).then(b=>{if(b){const u=URL.createObjectURL(b),i=$("scr"),old=i.src;i.src=u;if(old.startsWith("blob:"))URL.revokeObjectURL(old)}}).catch(()=>{}).finally(()=>{phoneTimer=setTimeout(refreshScreen,700)})}
+function togglePhone(on){phoneOn=on;$("phone").classList.toggle("open",on);clearTimeout(phoneTimer);if(on)refreshScreen()}
+function pt(e){const i=$("scr"),r=i.getBoundingClientRect();return{x:Math.round((e.clientX-r.left)*i.naturalWidth/r.width),y:Math.round((e.clientY-r.top)*i.naturalHeight/r.height),cx:e.clientX-r.left,cy:e.clientY-r.top}}
+$("scr").onmousedown=e=>{down=pt(e)};
+$("scr").onmouseup=e=>{if(!down)return;const u=pt(e),d=down;down=null;const dot=$("tapdot");dot.style.left=u.cx+"px";dot.style.top=u.cy+"px";dot.style.display="block";setTimeout(()=>dot.style.display="none",300);
+ if(Math.hypot(u.x-d.x,u.y-d.y)<8)input({type:"tap",x:u.x,y:u.y});else input({type:"swipe",x1:d.x,y1:d.y,x2:u.x,y2:u.y})};
+document.querySelectorAll("#phone [data-k]").forEach(b=>b.onclick=()=>input({type:"key",key:b.dataset.k}));
+$("typeBox").onkeydown=e=>{if(e.key==="Enter"){input({type:"text",text:e.target.value});input({type:"key",key:"enter"});e.target.value=""}};
+$("phoneBtn").onclick=()=>togglePhone(!phoneOn);$("phoneClose").onclick=()=>togglePhone(false);
+fetch("/api/status").then(r=>r.json()).then(s=>{if(s.phone){$("phoneBtn").style.display="";if(params.get("phone")==="1")togglePhone(true)}}).catch(()=>{});
 connect();
 </script>
 </body>

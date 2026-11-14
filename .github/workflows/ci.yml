@@ -1,3 +1,10 @@
+# Automatic checks on every push and pull request. A green badge means all of these passed:
+#   python      - unit tests, lint (ruff), formatting and type checks, on Python 3.10-3.13
+#   plugin      - the QEMU tracing plugin compiles against QEMU's plugin API
+#   qemu-patch  - the built-in tracer patch still applies cleanly to the pinned QEMU
+#   e2e         - builds a real QEMU, runs a test program under BOTH tracing engines and
+#                 checks order, library offsets, registers, strings and floats in the trace
+#   docker      - the full DroidTrace image still builds (main branch only)
 name: CI
 on:
   push: {branches: [main]}
@@ -9,7 +16,7 @@ jobs:
     strategy: {matrix: {python: ["3.10", "3.11", "3.12", "3.13"]}}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: {python-version: "${{ matrix.python }}"}
       - run: pip install -e ".[dev,disasm,parquet]"
       - run: ruff check src tests

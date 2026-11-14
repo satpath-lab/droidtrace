@@ -96,23 +96,18 @@ class AdbClient:
             time.sleep(5)
         raise AdbError("guest did not finish booting in time")
 
-    def install(self, apk: Path, attempts: int = 6) -> None:
+    def install(self, apk: Path | list[Path], attempts: int = 6) -> None:
         # Right after a snapshot restore the package service can still be waking up
         # ("Broken pipe", "Can't find service: package"); wait for it and retry.
         for i in range(attempts):
             self.ensure_online()
-            ready_by = time.monotonic() + 300
-            while time.monotonic() < ready_by:
-                try:
-                    if self.shell("pm path android", check=False, timeout=20).startswith(
-                        "package:"
-                    ):
-                        break
-                except subprocess.TimeoutExpired:
-                    pass  # system_server still catching up after the restore
-                time.sleep(3)
+            self.wait_package_service()
             try:
-                self._run("install", "-r", "-g", str(apk), timeout=600)
+                files = apk if isinstance(apk, list) else [apk]
+                if len(files) == 1:
+                    self._run("install", "-r", "-g", str(files[0]), timeout=600)
+                else:  # split app: base + config splits in one transaction
+                    self._run("install-multiple", "-r", "-g", *map(str, files), timeout=900)
                 return
             except (AdbError, subprocess.TimeoutExpired):
                 if i == attempts - 1:
@@ -120,12 +115,100 @@ class AdbClient:
                 log.info("install failed, retrying (package service still starting)")
                 time.sleep(5)
 
+    def dismiss_dialogs(self) -> None:
+        """Close system dialogs such as "System UI isn't responding", which can pop up right
+        after a snapshot restore (the phone's clock jumps)."""
+        with contextlib.suppress(subprocess.TimeoutExpired, AdbError):
+            self.shell(
+                "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS",
+                check=False,
+                timeout=60,
+            )
+
     def launch(self, package: str, activity: str | None = None) -> None:
         self.ensure_online()
+        self.dismiss_dialogs()
         if activity:
             self.shell(f"am start -n {package}/{activity}")
         else:
             self.shell(f"monkey -p {package} -c android.intent.category.LAUNCHER 1")
+
+    def wait_package_service(self, timeout: float = 300) -> None:
+        """Right after a snapshot restore Android needs a moment before it answers."""
+        ready_by = time.monotonic() + timeout
+        while time.monotonic() < ready_by:
+            try:
+                if self.shell("pm path android", check=False, timeout=20).startswith("package:"):
+                    return
+            except subprocess.TimeoutExpired:
+                pass  # system_server still catching up
+            time.sleep(3)
+
+    def prepare_device(self) -> None:
+        """Get the phone ready for analysis: skip the welcome wizard, no install verification.
+
+        Best effort: a slow phone must not stop the analysis.
+        """
+        self.wait_package_service()
+        with contextlib.suppress(subprocess.TimeoutExpired, AdbError):
+            self.shell(
+                "settings put global device_provisioned 1; "
+                "settings put secure user_setup_complete 1; "
+                # Package verification would try to check every install online and can hang.
+                "settings put global verifier_verify_adb_installs 0; "
+                "settings put global package_verifier_enable 0; "
+                # keep the screen on, so the phone panel never goes black
+                "svc power stayon true; settings put system screen_off_timeout 2147483647; "
+                "input keyevent 224; "
+                # one default home screen, so Home doesn't open a "Select a home app" chooser
+                "cmd package set-home-activity "
+                "com.android.launcher3/com.android.launcher3.Launcher >/dev/null 2>&1; "
+                "for p in $(pm list packages | grep -iE 'setupwizard|provision' | cut -d: -f2); "
+                "do pm disable-user --user 0 $p >/dev/null 2>&1; done; "
+                "input keyevent 3",
+                check=False,
+                timeout=240,
+            )
+
+    def enable_internet(self) -> None:
+        """Give Android a real default network (route + DNS) through QEMU's user networking.
+
+        Android-x86 shows the network card as Wi-Fi and never joins a network by itself, so
+        apps would see no connection. This registers one directly with netd.
+        """
+        self.shell(
+            "IF=$(ip -o -4 addr | grep 10.0.2.15 | awk '{print $2}' | head -1); "
+            "ip route add default via 10.0.2.2 dev $IF 2>/dev/null; "
+            "ndc network create 100 >/dev/null 2>&1; "
+            "ndc network interface add 100 $IF >/dev/null 2>&1; "
+            "ndc network route add 100 $IF 10.0.2.0/24 >/dev/null 2>&1; "
+            "ndc network route add 100 $IF 0.0.0.0/0 10.0.2.2 >/dev/null 2>&1; "
+            "ndc resolver setnetdns 100 '' 10.0.2.3 >/dev/null 2>&1; "
+            "ndc network default set 100 >/dev/null 2>&1",
+            check=False,
+        )
+
+    def wait_idle(self, max_load: float = 4.0, timeout: float = 1200) -> bool:
+        """Wait until the phone stops being busy (e.g. Google Play services' first-time setup).
+
+        Saving the boot snapshot while the phone is busy would make every run start busy.
+        """
+        deadline = time.monotonic() + timeout
+        calm = 0
+        while time.monotonic() < deadline:
+            try:
+                load = float(self.shell("cat /proc/loadavg", check=False, timeout=30).split()[0])
+            except (ValueError, IndexError, subprocess.TimeoutExpired):
+                load = 99.0
+            calm = calm + 1 if load < max_load else 0
+            if calm >= 3:
+                return True
+            time.sleep(20)
+        return False
+
+    def abilist(self) -> list[str]:
+        out = self.shell("getprop ro.product.cpu.abilist", check=False).strip()
+        return [a for a in out.split(",") if a]
 
     def pidof(self, package: str) -> int | None:
         out = self.shell(f"pidof {package}", check=False).split()
